@@ -17,14 +17,20 @@ size_t scan_file(FILE *fp) {
   return sz;
 }
 
+// int clrf(char *str, int left) {
+//   if (left < 4);
+// }
+
+int next_line(char *)
+
 int main(int argc, char *argv[]) {
 
-  /* Kontrola argumentów ... */
+  /****************************** Kontrola argumentów ********************************/
   if (argc != 4) {
     fatal("Usage: %s host port", argv[0]);
   }
 
-  // Adres połączenia
+  /****************************** Adres połączenia ***********************************/
   size_t addr_len = strlen(argv[1]);
   size_t i;
   for (i = 0; i < addr_len && argv[1][i] != ':'; i++);
@@ -41,22 +47,32 @@ int main(int argc, char *argv[]) {
   int port = atoi(port_str);
   printf("Server address: %s\nPort: %d\n", argv[1], port);
 
-  // Plik ciasteczek
+  /***************************** Plik ciasteczek *************************************/
   FILE *fp = fopen(argv[2], "r");
   if (fp == NULL)
     syserr("file");
   size_t file_size = scan_file(fp);
+  char *cookies = malloc(file_size * 2 * sizeof(char));
   char line[BUFFER_SIZE];
 
+  size_t cookie_it = 0, j, read_ammount;
   for (i = 0; i < file_size; i += BUFFER_SIZE) {
     memset(line, 0, BUFFER_SIZE);
-    fread(line, 1, BUFFER_SIZE, fp);
+    read_ammount = fread(line, 1, BUFFER_SIZE, fp);
     printf("%s", line);
+    for (j = 0; j < read_ammount; j++) {
+      if (line[j] == '\n') {
+        cookies[cookie_it++] = ';';
+        cookies[cookie_it++] = ' ';
+      } else {
+        cookies[cookie_it++] = line[i];
+      }
+    }
   }
   printf("\n");
   fclose(fp);
 
-  // Testowany adres HTTP
+  /**************************** Testowany adres HTTP *********************************/
   addr_len = strlen(argv[3]);
   int slash_cnt = 2;
   for (i = 0; i < addr_len && slash_cnt != 0; i++) {
@@ -85,17 +101,21 @@ int main(int argc, char *argv[]) {
 
   printf("host: %s\norigin_form: %s\n", host, origin_form);
 
-  size_t request_size = sizeof(origin_form) + sizeof(host) + 80;
+  /************************************* REQUEST *************************************/
+
+  size_t request_size = sizeof(origin_form) + sizeof(host) + file_size * 2 + 40;
   char *request = malloc(request_size * sizeof(char));
-  snprintf(request, request_size, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", origin_form, host);
+  snprintf(request, request_size, "GET %s HTTP/1.1\r\nHost: %s\r\nCookie: %s\r\n\r\n", origin_form, host, cookies);
   printf("Request: %s\n", request);
-  free(origin_form);
+  free(cookies);
   free(host);
+  free(origin_form);
+
+  /************************************ Połączenie ***********************************/
 
   int rc, ret;
   int sock;
   struct addrinfo addr_hints, *addr_result;
-
 
   sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (sock < 0) {
@@ -121,40 +141,33 @@ int main(int argc, char *argv[]) {
   }
   freeaddrinfo(addr_result);
 
+  /******************************* Wysłanie rządania *********************************/
 
   if (write(sock, request, strlen(request)) < 0)
     syserr("write socket – request");
   free(request);
 
-  // write(sock, request, sizeof(request));
-
+  /****************************** Odebranie odpowiedzi *******************************/
+  char chunkSuffix[4];
   for (;;) {
-    printf("reading\n");
     memset(line, 0, sizeof(line));
     ret = read(sock, line, sizeof(line) - 1);
     if (ret == -1)
       syserr("read");
     else if (ret == 0)
       break;
-    if (line[ret - 1] != '\n')
-      line[ret++] = '\n';
-    printf("%s\n", line);
+    printf("%s", line);
+    if (ret >= 4) {
+      chunkSuffix[0] = line[ret-4];
+      chunkSuffix[1] = line[ret-3];
+      chunkSuffix[2] = line[ret-2];
+      chunkSuffix[3] = line[ret-1];
+    }
+
+    // printf("LAST BYTE %d\n",(int)line[ret-1]);
   }
 
-
-  // // wyślij nazwe pliku
-  // if (write(sock, file_name, BUFFER_SIZE) < 0)
-  //   syserr("write socket – file_name");
-
-  // // wyślij plik
-  // for (size_t i = 0; i < file_size; i += BUFFER_SIZE) {
-  //   memset(line, 0, sizeof(line));
-  //   fread(line, 1, BUFFER_SIZE, fp);
-  //   if (write(sock, line, strlen(line)) < 0)
-  //     syserr("write socket – file batch");
-  // }
-  // printf("WYSLANO\n");
-
+  /***************************** Zakończenie połączenia ******************************/
   if (close(sock) < 0)
     syserr("close socket");
 }
