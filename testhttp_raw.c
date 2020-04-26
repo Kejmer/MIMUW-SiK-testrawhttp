@@ -8,7 +8,21 @@
 #include <unistd.h>
 #include "err.h"
 
-#define BUFFER_SIZE      1024
+#define BUFFER_SIZE    5123
+
+typedef struct {
+  int sock;
+
+  size_t ind;
+  size_t end;
+  char *line;
+
+  int is_chunked;
+  char **cookies;
+  size_t cookies_max;
+  size_t cookies_num;
+  size_t sum;
+} reader_t;
 
 size_t scan_file(FILE *fp) {
   fseek(fp, 0L, SEEK_END);
@@ -17,18 +31,172 @@ size_t scan_file(FILE *fp) {
   return sz;
 }
 
-// int clrf(char *str, int left) {
-//   if (left < 4);
-// }
+size_t left(reader_t *r) {
+  return r->end - r->ind + 1;
+}
 
-int next_line(char *)
+int read_socket(reader_t *r) {
+  memset(r->line, 0, BUFFER_SIZE);
+  int ret = read(r->sock, r->line, BUFFER_SIZE - 1);
+  if (ret < 0)
+    syserr("read");
+  r->ind = 0;
+  r->end = (size_t)(ret - 1);
+  return ret;
+}
+
+size_t next(reader_t *r) {
+  r->ind++;
+  if (r->ind > r->end)
+    read_socket(r);
+  return 1;
+}
+
+size_t go_until(reader_t *r, char end_char) {
+  size_t res = 0;
+  while (r->line[r->ind] != end_char)
+    res += next(r);
+  return res;
+}
+
+size_t skip_amount(reader_t *from, size_t amount) {
+  size_t skipped = 0;
+  while (skipped++ != amount)
+    next(from);
+  return amount;
+}
+
+size_t copy_until(reader_t *from, char *to, char end_char) {
+  size_t copied = 0;
+  while (from->line[from->ind] != end_char) {
+    to[copied++] = from->line[from->ind];
+    next(from);
+  }
+  to[copied] = '\0';
+  return copied;
+}
+
+size_t next_line(reader_t *r) {
+  size_t distance = go_until(r, '\n');
+  return next(r) + distance;
+}
+
+char current_char(reader_t *r) {
+  if (r->ind > r->end)
+    read_socket(r);
+  return r->line[r->ind];
+}
+
+int parse_status(reader_t *r) {
+  char stat_str[40];
+  memset(stat_str, 0, 40);
+
+  read_socket(r);
+  go_until(r, ' ');
+  next(r);
+  copy_until(r, stat_str, '\r');
+  next_line(r);
+
+  if (strcmp("200 OK", stat_str) == 0)
+    return 1;
+
+  printf("%s\n", stat_str);
+  return 0;
+}
+
+int read_field(reader_t *r) {
+  if (current_char(r) == '\r') {
+    next(r);
+    if (current_char(r) == '\n') //raczej nie zajdzie sytuacja przeciwna
+      return 0;
+  }
+  return 1;
+}
+
+void get_cookie(reader_t *r) {
+  size_t i = 0;
+  if (r->cookies_num == r->cookies_max) {
+    r->cookies_max *= 2;
+    r->cookies = realloc(r->cookies, r->cookies_max * sizeof(char));
+  }
+  size_t cookie_size = BUFFER_SIZE;
+  r->cookies[r->cookies_num] = malloc(cookie_size * sizeof(char));
+  while (current_char(r) != '\r' && current_char(r) != ';') {
+    if (i + 2 >= cookie_size) {
+      cookie_size *= 2;
+      r->cookies[r->cookies_num] = realloc(r->cookies[r->cookies_num], cookie_size * sizeof(char));
+    }
+    r->cookies[r->cookies_num][i++] = current_char(r);
+    next(r);
+  }
+  r->cookies[r->cookies_num][i] = '\0';
+  r->cookies_num++;
+}
+
+void parse_header(reader_t *r) {
+  char token[BUFFER_SIZE], value[BUFFER_SIZE];
+  memset(token, 0, BUFFER_SIZE);
+  memset(value, 0, BUFFER_SIZE);
+  while(read_field(r)) {
+    copy_until(r, token, ':');
+    next(r); // usuń ':'
+    next(r); // usuń ' '
+    if (strcmp(token, "Transfer-Encoding") == 0) {
+      copy_until(r, value, '\r');
+      if (strcmp(value, "chunked") == 0)
+        r->is_chunked = 1;
+    }
+    else if (strcmp(token, "Set-Cookie") == 0) {
+      get_cookie(r);
+    }
+    next_line(r);
+  }
+  next_line(r);
+}
+
+size_t parse_not_chunked(reader_t *r) {
+  r->sum = left(r);
+  while (left(r) > 0) {
+    read_socket(r);
+    r->sum += left(r);
+  }
+  return r->sum;
+}
+
+size_t get_chunk_size(reader_t *r) {
+  char line[20];
+  char *endPtr;
+  memset(line, 0, 20);
+  copy_until(r, line, '\r');
+  next_line(r);
+  return strtol(line, &endPtr, 16);
+}
+
+size_t parse_chunked(reader_t *r) {
+  size_t chunk_size = get_chunk_size(r);
+  while (chunk_size != 0 ) {
+    r->sum += chunk_size;
+    skip_amount(r, chunk_size);
+    next_line(r);
+
+    chunk_size = get_chunk_size(r);
+  }
+
+  return r->sum;
+}
+
+void report(reader_t *r) {
+  printf("%ld\n", r->cookies_num);
+  for (size_t i = 0; i < r->cookies_num; i++)
+    printf("%s\n", r->cookies[i]);
+  printf("Dlugosc zasobu: %ld\n", r->sum);
+}
 
 int main(int argc, char *argv[]) {
 
   /****************************** Kontrola argumentów ********************************/
-  if (argc != 4) {
+  if (argc != 4)
     fatal("Usage: %s host port", argv[0]);
-  }
 
   /****************************** Adres połączenia ***********************************/
   size_t addr_len = strlen(argv[1]);
@@ -44,8 +212,6 @@ int main(int argc, char *argv[]) {
   for (i = 0; i < port_len; i++)
     port_str[i] = argv[1][addr_len + i];
   port_str[port_len] = '\0';
-  int port = atoi(port_str);
-  printf("Server address: %s\nPort: %d\n", argv[1], port);
 
   /***************************** Plik ciasteczek *************************************/
   FILE *fp = fopen(argv[2], "r");
@@ -55,21 +221,19 @@ int main(int argc, char *argv[]) {
   char *cookies = malloc(file_size * 2 * sizeof(char));
   char line[BUFFER_SIZE];
 
-  size_t cookie_it = 0, j, read_ammount;
+  size_t cookie_it = 0, j, read_amount;
   for (i = 0; i < file_size; i += BUFFER_SIZE) {
     memset(line, 0, BUFFER_SIZE);
-    read_ammount = fread(line, 1, BUFFER_SIZE, fp);
-    printf("%s", line);
-    for (j = 0; j < read_ammount; j++) {
+    read_amount = fread(line, 1, BUFFER_SIZE, fp);
+    for (j = 0; j < read_amount; j++) {
       if (line[j] == '\n') {
         cookies[cookie_it++] = ';';
         cookies[cookie_it++] = ' ';
       } else {
-        cookies[cookie_it++] = line[i];
+        cookies[cookie_it++] = line[i+j];
       }
     }
   }
-  printf("\n");
   fclose(fp);
 
   /**************************** Testowany adres HTTP *********************************/
@@ -99,21 +263,18 @@ int main(int argc, char *argv[]) {
     origin_form[i-base] = argv[3][i];
   origin_form[i-base] = '\0';
 
-  printf("host: %s\norigin_form: %s\n", host, origin_form);
-
   /************************************* REQUEST *************************************/
 
-  size_t request_size = sizeof(origin_form) + sizeof(host) + file_size * 2 + 40;
+  size_t request_size = strlen(origin_form) + strlen(host) + file_size * 2 + 80;
   char *request = malloc(request_size * sizeof(char));
-  snprintf(request, request_size, "GET %s HTTP/1.1\r\nHost: %s\r\nCookie: %s\r\n\r\n", origin_form, host, cookies);
-  printf("Request: %s\n", request);
+  snprintf(request, request_size, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nCookie: %s\r\n\r\n", origin_form, host, cookies);
   free(cookies);
   free(host);
   free(origin_form);
 
   /************************************ Połączenie ***********************************/
 
-  int rc, ret;
+  int rc;
   int sock;
   struct addrinfo addr_hints, *addr_result;
 
@@ -148,26 +309,29 @@ int main(int argc, char *argv[]) {
   free(request);
 
   /****************************** Odebranie odpowiedzi *******************************/
-  char chunkSuffix[4];
-  for (;;) {
-    memset(line, 0, sizeof(line));
-    ret = read(sock, line, sizeof(line) - 1);
-    if (ret == -1)
-      syserr("read");
-    else if (ret == 0)
-      break;
-    printf("%s", line);
-    if (ret >= 4) {
-      chunkSuffix[0] = line[ret-4];
-      chunkSuffix[1] = line[ret-3];
-      chunkSuffix[2] = line[ret-2];
-      chunkSuffix[3] = line[ret-1];
-    }
+  reader_t *r = malloc(sizeof(reader_t));
+  r->line = line;
+  r->sock = sock;
+  r->is_chunked = 0;
+  r->cookies_num = 0;
+  r->cookies_max = 100;
+  r->cookies = malloc(r->cookies_max * sizeof(char*));
+  r->sum = 0;
 
-    // printf("LAST BYTE %d\n",(int)line[ret-1]);
+  if (parse_status(r)) {
+    parse_header(r);
+    if (r->is_chunked)
+      parse_chunked(r);
+    else
+      parse_not_chunked(r);
+    report(r);
   }
 
   /***************************** Zakończenie połączenia ******************************/
+  for (i = 0; i < r->cookies_num; i++)
+    free(r->cookies[i]);
+  free(r->cookies);
+  free(r);
   if (close(sock) < 0)
     syserr("close socket");
 }

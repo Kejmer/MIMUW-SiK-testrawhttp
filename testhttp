@@ -1,0 +1,45 @@
+#!/bin/bash
+
+# Liczba argumentów
+if [[ $# -ne 2 ]]; then
+  exit 1
+fi
+
+# Czy istnieje plik z ciasteczkami?
+if [[ ! -f "$2" ]]; then
+  exit 1
+fi
+
+# Czy istnieje binarka?
+if [[ ! -f "testhttp_raw" ]]; then
+  exit 1
+fi
+
+# Czy https?
+is_ssl=$(python -c "str = '$1'; print(str[:5] == 'https')")
+
+if [[ $is_ssl == "True" ]]; then
+  loop_var=1
+  cur_dir=$(pwd)
+  connect_addr=$(python -c "str = '$1'; str_arr = str.split('/'); print(str_arr[2] + ':443')")
+
+  while [[ $loop_var -eq 1 ]]; do
+    port=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+    echo  "
+      pid = ${cur_dir}/stunnel.pid
+
+      [service]
+      client = yes
+      connect = ${connect_addr}
+      accept = localhost:${port}
+    " > config
+    stunnel config
+    loop_var=$?
+  done
+  rm config
+  ./testhttp_raw localhost:${port} $2 $1
+  kill `cat stunnel.pid` #kill .pid jednocześnie usuwa plik
+else
+  addr=$(python -c "str = '$1'; str_arr = str.split('/') ; print(str_arr[2] + ':80')")
+  ./testhttp_raw $addr $2 $1
+fi
