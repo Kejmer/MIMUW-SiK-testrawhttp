@@ -16,7 +16,6 @@ typedef struct {
   size_t ind;
   size_t end;
   char *line;
-
   int is_chunked;
   char **cookies;
   size_t cookies_max;
@@ -302,7 +301,7 @@ int main(int argc, char *argv[]) {
   }
   freeaddrinfo(addr_result);
 
-  /******************************* Wysłanie rządania *********************************/
+  /******************************* Wysłanie żądania **********************************/
 
   if (write(sock, request, strlen(request)) < 0)
     syserr("write socket – request");
